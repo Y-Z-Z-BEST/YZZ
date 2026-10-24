@@ -27,6 +27,25 @@
 # ═════════════════════════════════════════════════════════════════════
 set -uo pipefail
 
+# ── UTF-8 locale 兜底(最先做,越早越好)──────────────────────────────
+# start.cmd 用 `bash launch.sh` 启动我们,这是**非登录** shell,不会读
+# /etc/profile.d/lang.sh —— 所以 LANG/LC_ALL 可能是空的。那时 bash 的
+# ${#s} 数的是字节而不是字符,子脚本(TUI 的整套列宽计算)全部错位:
+# 边框短 8~24 列、右边框碎裂、状态词折行到下一行行首。
+# 完整复盘见 hub/README.md 第 16 条。这里补好并导出,让 TUI 与
+# check-agents.sh / wipe-creds.sh 都继承到。
+_probe='中'
+if [[ "${#_probe}" -ne 1 ]]; then
+    for _lc in C.UTF-8 C.utf8 en_US.UTF-8 zh_CN.UTF-8; do
+        if ( export LC_ALL="$_lc"; [[ "${#_probe}" -eq 1 ]] ) 2>/dev/null; then
+            export LC_ALL="$_lc"
+            unset LANG LC_CTYPE 2>/dev/null || true
+            break
+        fi
+    done
+fi
+unset _probe _lc 2>/dev/null || true
+
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TUI="$HERE/tui/agentbox-tui.sh"
 LIST="$HERE/tui/agents.tsv"

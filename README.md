@@ -19,7 +19,8 @@
 | 换台电脑盘符变了，配置全丢 | `subst` 映射成固定虚拟盘符（优先 `Q:`），配置写在盘内 `home\`，跟盘走 |
 | 长路径撞 Windows 260 字符限制 | 根路径缩短到 `Q:\`，node_modules 再深也不炸 |
 | 公共电脑上不敢留登录态 | 退出时按白名单擦凭据、保留配置；`KEEP_CREDS=1` 可跳过 |
-| 20 个 agent 记不住哪个能用 | TUI 一屏列出全部，实时探测「就绪 / 已安装 / 未安装」 |
+| 20 个 agent 记不住哪个能用 | TUI 一屏列出全部，实时探测「就绪 / 已安装 / 未安装」，页脚给出 `✓2 ✗6` 统计 |
+| 界面在别人机器上悄悄错位 | 所有列宽都是手算的，所以带**版面自检**：`bash hub/tui/selftest.sh` 逐行验证宽度、边框和行数 |
 
 ## 快速开始
 
@@ -40,13 +41,14 @@ rem 2) 双击 start.cmd
 | `cleanup-drive.cmd` | 手动清掉 `subst` 残留的虚拟盘符（不删任何文件） |
 | `repo-push.cmd` | 一键 `git add -A → commit → push` |
 | `hub/launch.sh` | 前置检查 + 启动 TUI |
-| `hub/tui/agentbox-tui.sh` | 主 TUI：agent 检测、按状态排序、滚动视口、YZZ 块字 |
+| `hub/tui/agentbox-tui.sh` | 主 TUI：agent 检测、按状态排序、滚动视口、YZZ 块字、帮助浮层 |
+| `hub/tui/selftest.sh` | 版面回归：10 种终端尺寸下逐行验证宽度 / 边框 / 行数 |
 | `hub/tui/agents.tsv` | agent 清单：命令名 / 显示名 / 凭据探测方式 / 备注 |
 | `hub/tui/check-agents.sh` | 状态探测；支持 `!` 前缀的自定义探测命令（退出码 0 = 就绪） |
 | `hub/tui/logo/` | `Y` 块字与 `YZZ` 字标（几何生成，不依赖字体） |
 | `hub/bin/dsh.sh` | 运行时定位 DeepSeek Harness CLI（`$DSH_BIN` → `dsh.path` → PATH → 常见安装根 → 包内 `dsh/`） |
 | `hub/bin/wipe-creds.sh` | 按白名单擦凭据、保留配置 |
-| `hub/README.md` | TUI 完整说明 + 15 条踩坑复盘（宽度计算、子 shell 风暴、ANSI 重绘等） |
+| `hub/README.md` | TUI 完整说明 + 键位 + 自检 + 24 条踩坑复盘（locale 宽度、子 shell 风暴、缩放、ANSI 重绘等） |
 | `docs/screenshot.png` | 上面那张截图 |
 
 **不进仓库的**（`.gitignore`）：`runtime/`（487 MB 的 PortableGit + Node）、`npm-global/`（agent 实体）、`dsh/`（便携版 DSH 的 App 与数据，体积大且含会话）、`home/`（伪装用户目录，**登录态凭据在这里**）、`temp/` `logs/` `workspace/`。
@@ -84,17 +86,22 @@ Q:\runtime\node\npm.cmd install -g @google/gemini-cli
 | `KEEP_CREDS=1` | 本次不擦凭据（自己机器上调试时用） |
 | `PA_NO_TUI=1` | 只准备环境并打印各变量实际值，不进 TUI（排查用） |
 
+菜单键位：`↑↓`/`jk` 移动，`Home`/`End`/`PgUp`/`PgDn` 跳转，`Enter` 启动，`r` 重新探测状态，`?` 打开帮助，`q`/`Esc` 退出。装完新 agent 按 `r` 即可，不用重启启动器。
+
 进程被强杀导致盘符残留时，运行 `cleanup-drive.cmd` 立即清除。虚拟盘不占空间、不是新分区、不修改磁盘内容，注销即消失。
 
 ## 安全模型
 
 - **凭据永不入仓库**：`home\` 整目录被忽略；退出时还会主动擦除（白名单见 `hub/bin/wipe-creds.sh`）。
+- **擦除不依赖虚拟盘**：清理段用脚本所在真实路径（`%~dp0`）重建 `HOME` 等变量再擦 —— 即使 `subst` 映射已经消失也照样擦，找不到 bash 时会明确告警 `CREDENTIALS WERE NOT WIPED` 而不是假装成功。
 - **能带走的是启动器与配置；agent 本体和登录态必须在那台机器上重新登录。** 这是刻意的设计，不要把 token 拷进盘里带来带去。
 - `docs/screenshot.png` 里出现的都是已安装/未安装状态，不含任何账号信息。
 
 ## 已知限制
 
-- TUI 在裸 `conhost`（直接开 `cmd.exe` 窗口）下渲染异常：框宽不足、底边框碎裂。`start.cmd` 检测到 `wt.exe` 会自动转交到 Windows Terminal；没有 WT 的机器建议先装。
+- **裸 `conhost` 现在能正常渲染**：历史上说的「conhost 下框宽不足、底边框碎裂」是假的，真因是非登录 bash 拿不到 UTF-8 locale，导致列宽按**字节**计算（详见 `hub/README.md` 第 16 条）。已修，并有 `hub/tui/selftest.sh` 守着。`start.cmd` 检测到 `wt.exe` 仍会转交（WT 的字体更全、体验更好）。
+- **字形回退**：裸 conhost 的默认字体没有 `❯`、`⚠`、`✗`，会退化成 `>`、`△`、`x`。都是 1 列宽，版面不受影响。
+- **窗口缩放后约 1 秒内自动重排**：Windows 控制台不可靠地送 SIGWINCH，所以改成空闲轮询终端尺寸。
 - 便携 Node / PortableGit 的版本是文档里的约定，不写进脚本；升级运行时请同步更新本 README。
 - 仅支持 Windows（依赖 `subst`、`cmd.exe`、`%~dp0` 语义）。Linux / macOS 上没有等价需求，直接用系统的包管理器即可。
 

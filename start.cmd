@@ -31,12 +31,13 @@ set "THIS_DIR=%~dp0"
 if "%THIS_DIR:~-1%"=="\" set "THIS_DIR=%THIS_DIR:~0,-1%"
 
 rem ---- 0) prefer Windows Terminal ----------------------------------
-rem A bare cmd.exe console renders this TUI badly (double-drawn frames,
-rem leftover fragments on the right edge) while the exact same script is
-rem fine inside Windows Terminal. Rather than fight conhost, hand off:
-rem re-launch this same file inside a Windows Terminal tab and exit.
-rem PA_IN_WT guards against an endless relaunch loop.
-if not defined PA_IN_WT (
+rem A bare conhost console used to render this TUI badly. That turned out
+rem to be the missing UTF-8 locale (pitfall #16 in hub/README.md), not the
+rem console itself, so conhost is fine now. The handoff is kept only as a
+rem nicety for machines where WT exists; PA_IN_WT stops a relaunch loop,
+rem and PA_NO_TUI (debug) must stay in THIS window so the probe output is
+rem visible where it was asked for.
+if not defined PA_IN_WT if not defined PA_NO_TUI (
   where wt.exe >nul 2>&1
   if not errorlevel 1 (
     set "PA_IN_WT=1"
@@ -115,6 +116,14 @@ set "XDG_CACHE_HOME=%ROOT%\home\.cache"
 set "XDG_STATE_HOME=%ROOT%\home\.local\state"
 set "TEMP=%ROOT%\temp"
 set "TMP=%ROOT%\temp"
+rem
+rem Keep bash in a UTF-8 locale. start.cmd runs bash NON-login (it never
+rem reads /etc/profile.d/lang.sh), so LANG/LC_ALL would be empty and bash
+rem would count BYTES in ${\#s} instead of characters - every display-width
+rem calculation in the TUI then breaks (frame 8-24 columns short, right
+rem border pushed off screen, status words wrapping to the next line).
+rem See hub/README.md, pitfall #16.
+set "LC_ALL=C.UTF-8"
 
 if not exist "%APPDATA%"        mkdir "%APPDATA%"        >nul 2>&1
 if not exist "%LOCALAPPDATA%"   mkdir "%LOCALAPPDATA%"   >nul 2>&1
@@ -129,7 +138,10 @@ rem ---- 3) prepend the drive's runtime to PATH ----------------------
 rem npm on Windows writes its global shims (.cmd/.ps1) directly into the
 rem prefix folder, not into prefix\bin - so npm-global itself must be on
 rem PATH. The bin subfolder is kept as a harmless fallback.
-set "PATH=%ROOT%\runtime\node;%ROOT%\npm-global;%ROOT%\npm-global\bin;%ROOT%\runtime\git\bin;%ROOT%\runtime\git\usr\bin;%PATH%"
+rem The python runtime lives on the drive too: Aider is a PyPI package,
+rem not an npm one, so it needs an interpreter. Having it on PATH also
+rem gives any python-based agent a working python without touching the host.
+set "PATH=%ROOT%\runtime\node;%ROOT%\npm-global;%ROOT%\npm-global\bin;%ROOT%\runtime\git\bin;%ROOT%\runtime\git\usr\bin;%ROOT%\runtime\python;%ROOT%\runtime\python\Scripts;%PATH%"
 
 rem Make "npm install -g" default to the drive. Using env vars instead of
 rem a hardcoded .npmrc keeps the prefix correct when subst picks another
@@ -168,11 +180,32 @@ set "RC=%ERRORLEVEL%"
 
 :cleanup
 rem ---- 7) wipe credentials, then release the virtual drive ---------
+rem Cleanup must NOT depend on the subst mapping. Another instance, a manual
+rem cleanup-drive.cmd, or a hard kill can leave %ROOT% dead - and the old
+rem code then tried to run %ROOT%\runtime\git\bin\bash.exe, which no longer
+rem resolves, so the credential wipe was SKIPPED WITHOUT FAILING LOUDLY.
+rem That is the one promise this launcher must keep: login tokens must not
+rem stay on the drive. So rebuild every path from THIS_DIR (always real, it
+rem is where this file lives) before wiping.
+rem See hub/README.md, pitfall #24.
 echo.
 echo   Cleaning up...
-"%BASH%" "%ROOT%\hub\bin\wipe-creds.sh"
-if errorlevel 1 (
-  echo   [warn] some credential files could not be removed - check manually.
+set "BASH_REAL=%THIS_DIR%\runtime\git\bin\bash.exe"
+set "WIPE_SCRIPT=%THIS_DIR%\hub\bin\wipe-creds.sh"
+set "HOME=%THIS_DIR%\home"
+set "USERPROFILE=%THIS_DIR%\home"
+set "APPDATA=%THIS_DIR%\home\AppData\Roaming"
+set "LOCALAPPDATA=%THIS_DIR%\home\AppData\Local"
+set "TEMP=%THIS_DIR%\temp"
+set "TMP=%THIS_DIR%\temp"
+if not exist "%BASH_REAL%" (
+  echo   [warn] runtime\git\bin\bash.exe is missing - CREDENTIALS WERE NOT WIPED.
+  echo          delete home\ manually before ejecting the drive.
+) else (
+  "%BASH_REAL%" "%WIPE_SCRIPT%"
+  if errorlevel 1 (
+    echo   [warn] some credential files could not be removed - check manually.
+  )
 )
 
 if "%SUBBED%"=="1" (

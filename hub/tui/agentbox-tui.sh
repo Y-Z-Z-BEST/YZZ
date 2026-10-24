@@ -23,6 +23,40 @@
 # ═════════════════════════════════════════════════════════════════════
 set -uo pipefail
 
+# ── UTF-8 locale 兜底(2026-10-27)────────────────────────────────────
+# 为什么必须有这一块:start.cmd 用 `bash.exe launch.sh` 启动 TUI,这是
+# **非登录、非交互** shell,不会读 /etc/profile.d/lang.sh —— 所以 LANG /
+# LC_ALL 可能是空的。那时 bash 的 ${#s} 数的是**字节**而不是字符:
+#     ${#'开源'} = 6  (应为 2)
+#     ${#'█   █'} = 9 (应为 5)
+# 下面所有纯 bash 宽度计算(_dw)会整体算错,后果是每行短 8~24 列、右边框
+# 跑出框外、状态词溢出到下一行行首(屏幕左边缘出现 "Key"/"—"/"装" 残片)。
+# 这里自动补一个 UTF-8 locale 并自检;真补不上就降级用 wc -L(慢但正确),
+# 绝不让界面悄悄画错。完整复盘见 hub/README.md 第 16 条。
+_DW_FAST=1
+# ⚠ 必须借一个变量来量:写成 ${#中} 是非法替换(${#...} 里只能放变量名,
+#   非 ASCII 标识符会让 bash 直接报 "bad substitution")。
+_probe='中'
+if [[ "${#_probe}" -ne 1 ]]; then
+    _lc_ok=''
+    for _lc in C.UTF-8 C.utf8 en_US.UTF-8 zh_CN.UTF-8; do
+        # 子 shell 里试,避免 locale 无效时给后续每个子进程刷 setlocale 警告
+        if ( export LC_ALL="$_lc"; [[ "${#_probe}" -eq 1 ]] ) 2>/dev/null; then
+            _lc_ok="$_lc"; break
+        fi
+    done
+    if [[ -n "$_lc_ok" ]]; then
+        export LC_ALL="$_lc_ok"
+        unset LANG LC_CTYPE 2>/dev/null || true
+    else
+        _DW_FAST=0
+        printf '[warn] no UTF-8 locale available - falling back to wc -L for widths (slower).\n' >&2
+        printf '       install one (e.g. C.utf8) or run: LC_ALL=C.UTF-8 bash launch.sh\n' >&2
+    fi
+    unset _lc_ok _lc
+fi
+unset _probe
+
 # =====================================================================
 # YZZ 品牌释义 -- 三个单词的首字母
 #   改这一行就能换整套品牌文案(顶边框会立刻跟着变)
@@ -65,10 +99,38 @@ fi
 # 这一行放在分支外面,是刻意的安全网,不要挪进去。
 C_RST=$'\e[0m'
 
-term_cols() { local c; c=$(tput cols 2>/dev/null || echo 80); [[ "$c" =~ ^[0-9]+$ ]] || c=80; echo "$c"; }
-term_rows() { local r; r=$(tput lines 2>/dev/null || echo 24); [[ "$r" =~ ^[0-9]+$ ]] || r=24; echo "$r"; }
+# ── 选中光标字形 ────────────────────────────────────────────────────
+# 用 `›`(U+203A)而不是 `❯`(U+276F):后者在 Windows Terminal 里好看,但裸
+# conhost 的默认字体没有这个字形,实测会渲染成空心方块(缺字)。`›` 在两者
+# 都有字形(conhost 实测),而且都是 1 列宽 —— 这样不必做终端能力猜测。
+# 换字形时记得同步进 _DW_NARROW,否则宽度会多算 1 列。
+SEL_CUR='›'
 
-COLS=$(term_cols); ROWS=$(term_rows)
+# 终端尺寸:stty(真实 PTY 最准) → tput(认 COLUMNS/LINES) → 环境变量 → 默认值。
+# 为什么 stty 放第一:启动器用 `choice="$(bash tui.sh)"` 捕获 stdout 时,
+# tput 可能拿不到真实几何;而 COLUMNS 兜底是给 --dump 与 selftest.sh 用的
+# (无 PTY 时靠它强制尺寸做回归)。
+term_dims() {   # 结果写进全局 _TC / _TR,零 fork
+    local pair=''
+    [[ -t 0 ]] && pair=$(stty size 2>/dev/null)
+    if [[ "$pair" =~ ^([0-9]+)\ ([0-9]+)$ ]]; then
+        _TR=${BASH_REMATCH[1]}; _TC=${BASH_REMATCH[2]}
+    else
+        _TC=$(tput cols 2>/dev/null); _TR=$(tput lines 2>/dev/null)
+        [[ "$_TC" =~ ^[0-9]+$ ]] || _TC=${COLUMNS:-80}
+        [[ "$_TR" =~ ^[0-9]+$ ]] || _TR=${LINES:-24}
+    fi
+    [[ "$_TC" =~ ^[0-9]+$ ]] || _TC=80
+    [[ "$_TR" =~ ^[0-9]+$ ]] || _TR=24
+    (( _TC < 20 )) && _TC=20
+    (( _TR < 8 ))  && _TR=8
+    return 0
+}
+_TC=80; _TR=24
+term_cols() { term_dims; printf '%s\n' "$_TC"; }
+term_rows() { term_dims; printf '%s\n' "$_TR"; }
+
+term_dims; COLS=$_TC; ROWS=$_TR
 
 # ── 运行环境标签(动态探测,不写死某个平台)────────────────────────────
 # 移植说明:原版把 "WSL2 · Ubuntu 24.04" 写死在闪屏、把 "Linux · WSL2"
@@ -100,8 +162,9 @@ _i=0; while (( _i < 300 )); do HLINE+='─'; (( _i++ )); done; unset _i
 rule() { local n="${1:-$COLS}"; (( n > 300 )) && n=300; (( n < 1 )) && n=1; printf '%s\n' "${HLINE:0:n}"; }
 
 cleanup() { printf '%s' "$C_SHOW$C_RST"; [[ -n "${STTY_SAVED:-}" ]] && stty "$STTY_SAVED" 2>/dev/null; }
-trap 'cleanup; exit 130' INT TERM
-trap cleanup EXIT
+# ⚠ 清理钩子只在「真要接管终端」的路径上装(见文件末尾的入口段)。
+#   装在这里会让 --list / --width-probe / --dump 的输出末尾多一个 \033[0m,
+#   被管道或测试读到就污染最后一行(实测 --width-probe 的最后一条因此解析失败)。
 
 # ── 显示宽度(中文占 2 列,${#} 只数字符)────────────────────────────
 # 为什么必须有这组函数:
@@ -135,20 +198,43 @@ disp_w() { local s="$1"; wc -L <<< "$s"; }
 #   终端里默认按窄字符处理的还有整套制表和方块字符(█▀▄▐─│├┤╭╮╰╯…),
 #   它们也是非 ASCII 却只占 1 列,同样要扣。下面的列表是穷举过的,
 #   加新的装饰字符时记得同步补进来。
-_DW_NARROW=('·' '—' '✓' '✗' '●' '⚠' '❯' '◆' '▐'
+_DW_NARROW=('·' '—' '✓' '✗' '●' '⚠' '❯' '›' '◆' '▐'
             '█' '▀' '▄' '▌' '▍' '▎' '░' '▒' '▓'
             '─' '━' '│' '┃' '├' '┤' '┬' '┴' '┼'
-            '╭' '╮' '╰' '╯' '│' '↑' '↓' '→' '←')
-_dw() {
-    local s="$1"
-    local na="${s//[ -~]/}"          # 只剩非 ASCII
-    local n=$(( ${#s} + ${#na} ))
-    local c tmp
-    for c in "${_DW_NARROW[@]}"; do
-        tmp="${s//"$c"/}"
-        (( ${#tmp} < ${#s} )) && n=$(( n - (${#s} - ${#tmp}) ))
+            '╭' '╮' '╰' '╯' '↑' '↓' '→' '←')
+# ⚠ 这张表**不能有重复项**:同一个字符出现两次就会被扣两次宽度。
+#   实测原来 '│' 写了两遍,量 '╭── │ ├─┤ ╰──╯' 时 14 列被算成 13 列。
+#   下面的去重是纯 bash(零 fork),防止以后手滑再加一次。
+_DW_SEEN=(); _DW_UNIQ=()
+for _c in "${_DW_NARROW[@]}"; do
+    _dup=0
+    for _d in "${_DW_UNIQ[@]}"; do
+        [[ "$_c" == "$_d" ]] && { _dup=1; break; }
     done
-    _W=$n
+    (( _dup )) || _DW_UNIQ+=("$_c")
+done
+_DW_NARROW=("${_DW_UNIQ[@]}")
+unset _DW_SEEN _DW_UNIQ _c _d _dup
+_dw() {
+    if (( _DW_FAST )); then
+        local s="$1"
+        local na="${s//[ -~]/}"          # 只剩非 ASCII
+        local n=$(( ${#s} + ${#na} ))
+        local c tmp
+        for c in "${_DW_NARROW[@]}"; do
+            tmp="${s//"$c"/}"
+            (( ${#tmp} < ${#s} )) && n=$(( n - (${#s} - ${#tmp}) ))
+        done
+        _W=$n
+    else
+        # 兜底分支:没有 UTF-8 locale 时纯 bash 数不了「字符」(只能数字节),
+        # 退回 wc -L —— 注意 wc -L 自己也依赖 locale,所以显式给它一个 UTF-8
+        # 环境;真拿不到就只是近似(此时启动时已经打过警告)。
+        _W=$(LC_ALL=C.UTF-8 wc -L <<< "$1" 2>/dev/null)
+        [[ "$_W" =~ ^[0-9]+$ ]] || _W=$(wc -L <<< "$1" 2>/dev/null)
+        [[ "$_W" =~ ^[0-9]+$ ]] || _W=${#1}
+    fi
+    return 0
 }
 
 # 同上,但结果写进全局 _W(不 fork 子 shell,适合循环里用)
@@ -183,6 +269,10 @@ trunc_to() {
 IDS=(); NAMES=(); DESCS=(); STATES=()
 NAME_W=(); DESC_W=()
 load_agents() {
+    # ⚠ 必须先把旧数组清空:`r` 刷新会再次调用本函数,数组是 +=' 追加的,
+    #   不清就变成「9 项 → 18 项」的重复菜单(实测:按一次 r,列表翻倍)。
+    IDS=(); NAMES=(); DESCS=(); STATES=(); NAME_W=(); DESC_W=()
+
     local statuses=""
     [[ -r "$CHECK" ]] && statuses="$(bash "$CHECK" --tsv 2>/dev/null)"
 
@@ -211,6 +301,7 @@ load_agents() {
         _dw "$desc";  DESC_W+=("$_W")
     done < "$LIST"
     sort_by_state
+    count_states
 }
 
 # ── 按就绪程度重排 ──────────────────────────────────────────────────
@@ -285,7 +376,25 @@ _ROW=''      # make_row 的输出缓冲(不 echo,避免每个子 shell 14ms)
 
 # 布局参数(compute_layout / build_frame 写入,绘制时只读)
 LEFT_PAD=0; CW=0; ROW_W=0; AGENT_TOP=0; FOOTER_TOP=0
-TOP=''; BLANK=''; SEP=''; HDR=''; FOOT=''; BOTTOM=''; PAD=''
+TOP=''; BLANK=''; SEP=''; SEP_TOP=''; SEP_BOT=''; HDR=''; FOOT=''; BOTTOM=''; PAD=''
+KEYHINT=''; KEY_W=0; KEY_SHORT=''; KEY_SHORT_W=0; KEY_MINI=''; KEY_MINI_W=0
+TALLY=''; TALLY_W=0
+# 状态统计(页脚右侧显示「就绪 2 / 缺 Key 1 / 未安装 6」),只在重载清单时算一次
+N_OK=0; N_INST=0; N_WARN=0; N_MISS=0; N_SKIP=0
+count_states() {
+    N_OK=0; N_INST=0; N_WARN=0; N_MISS=0; N_SKIP=0
+    local s
+    for s in "${STATES[@]}"; do
+        case "$s" in
+            ok)        N_OK=$(( N_OK + 1 )) ;;
+            installed) N_INST=$(( N_INST + 1 )) ;;
+            needkey)   N_WARN=$(( N_WARN + 1 )) ;;
+            missing)   N_MISS=$(( N_MISS + 1 )) ;;
+            *)         N_SKIP=$(( N_SKIP + 1 )) ;;
+        esac
+    done
+    return 0
+}
 ROW_SEL=(); ROW_OFF=()
 ENV_TXT=''; KEY_W=0
 # 滚动视口:清单里可能有十几个 agent,多数终端放不下,只渲染可见窗口
@@ -381,8 +490,9 @@ pick_logo() {
 # ── 闪屏 ────────────────────────────────────────────────────────────
 show_splash() {
     [[ "${AGENTBOX_NO_SPLASH:-0}" == "1" ]] && return 0
+    (( NO_SPLASH )) && return 0
     (( ROWS < 20 || COLS < 50 )) && return 0
-    clear
+    printf '%s' "$_CLEAR"
     local l pad
     printf '\n'
     if (( ${#LOGO[@]} > 0 )); then
@@ -412,9 +522,11 @@ show_splash() {
     pad=$(( (COLS - mw) / 2 )); (( pad < 0 )) && pad=0
     printf '%*s%s%s%s\n\n' "$pad" '' "$C_DIM" "$msg" "$C_RST"
 
+    # 闪屏停留 0.64 秒(8 × 0.08):够看清品牌,又不至于每次启动都等一秒多。
+    # 任意键提前跳过 —— 老用户不该被自己的启动画面拖住。
     local i
-    for i in $(seq 1 12); do
-        read -rsn1 -t 0.1 _ 2>/dev/null && break
+    for i in 1 2 3 4 5 6 7 8; do
+        read -rsn1 -t 0.08 _ 2>/dev/null && break
     done
 }
 
@@ -426,17 +538,19 @@ show_splash() {
 # 带字标时再加 N 行块字 + 1 空行。
 # 剩下的行全给 agent 列表;不够就自动丢掉字标(小终端优先保证内容可见)。
 compute_layout() {
-    COLS=$(term_cols); ROWS=$(term_rows)
+    term_dims; COLS=$_TC; ROWS=$_TR
     local cols="$COLS"
-    CW=$(( cols - 8 )); (( CW > 100 )) && CW=100
-    # 终端太窄时(COLS<52)不再留左右边距,直接用满宽。
-    # ⚠ 这里必须是 $cols,写成 CW=cols 会把字符串 "cols" 赋给 CW,
-    #   随后算术运算把它当变量名去求值,报 "cols: unbound variable"。
-    #   这个笔误只在窄终端下触发,宽终端永远不会走到,所以长期没被发现。
-    (( CW < 44 )) && CW=$cols
-    (( CW < 40 )) && CW=40
+    # 常规宽度 = 终端宽 - 8 列边距,上限 100 列(再宽就不好扫读)。
+    # 窄终端(<47 列)改用满宽 -1:把最后一列写满会让终端进入「待换行」态,
+    # conhost 这类实现在随后的 \n 之前可能多滚一行,把顶边框吃掉。
+    # ⚠ 必须用 $cols,写成 CW=cols 会把字符串 "cols" 赋给 CW,
+    #   随后算术运算把它当变量名求值,报 "cols: unbound variable"。
+    if (( cols < 47 )); then CW=$(( cols - 1 )); else CW=$(( cols - 8 )); fi
+    (( CW > 100 )) && CW=100
+    (( CW > cols - 1 )) && CW=$(( cols - 1 ))    # 绝不超过终端宽(留 1 列安全位)
+    (( CW < 24 )) && CW=24
     LEFT_PAD=$(( (cols - CW) / 2 )); (( LEFT_PAD < 0 )) && LEFT_PAD=0
-    ROW_W=$(( CW - 4 ))
+    ROW_W=$(( CW - 4 )); (( ROW_W < 12 )) && ROW_W=12
 
     local n=${#IDS[@]}
 
@@ -450,7 +564,11 @@ compute_layout() {
         VIEW_H=$(( ROWS - fixed ))
     fi
     (( VIEW_H < 1 )) && VIEW_H=1
-    (( VIEW_H > n )) && VIEW_H=n
+    # ⚠ 必须写 $n,不能写 VIEW_H=n —— 那是把字面量字符 "n" 赋给 VIEW_H,
+    #   算术里再把它当变量 n 去求值。旧版本只是碰巧在 compute_layout 和
+    #   build_frame 里都声明了 local n,才侥幸算对(和 CW=cols 是同一类笔误)。
+    #   一旦某处在 n 之前用到 VIEW_H,就会炸 "n: unbound variable"。
+    (( VIEW_H > n )) && VIEW_H=$n
     (( VIEW_H < 1 )) && VIEW_H=1
 
     # 0 基屏幕行号
@@ -497,50 +615,72 @@ make_row() {
 
     # ⚠ 名字/描述列宽必须按当前 ROW_W 自适应,不能写死 14/26。
     #   行结构是: 空格+光标+空格+标记+空格 + name + 空格 + desc + 间隙 + 空格 + 状态
-    #   前面固定 5 列,中间 1 列,间隙至少 1 列,状态词最宽 6 列(未安装) ——
-    #   合计 5 + name_w + 1 + desc_w + 1 + 1 + 6 = name_w + desc_w + 14。
-    #   所以 name_w + desc_w 必须 ≤ ROW_W - 14,否则行内容会撑破右边框。
-    #
-    #   实测:cmd.exe 默认窗口只有 60 来列,CW≈50、ROW_W≈46,
-    #   而写死的 14+26=40 > 46-14=32 → 整行溢出、右边框被甩到框外。
-    #   便携工具会被插到各种尺寸的终端上,这里必须自适应。
+    #   前面固定 6 列,状态词最宽 6 列(未安装),间隙至少 1 列 ——
+    #   所以 name_w + desc_w + 6 + 1 + sw 必须 ≤ ROW_W,否则右边框被甩到框外。
+    #   实测:cmd.exe 默认窗口只有 60 来列,写死 14+26 时整行溢出。
     local avail=$(( ROW_W - 14 ))
-    (( avail < 12 )) && avail=12
+    (( avail < 6 )) && avail=6
     local name_w desc_w
     name_w=$(( avail * 35 / 100 )); (( name_w > 14 )) && name_w=14; (( name_w < 8 )) && name_w=8
     desc_w=$(( avail - name_w ));    (( desc_w > 26 )) && desc_w=26; (( desc_w < 6 )) && desc_w=6
 
     local cur=' '
-    (( is_sel == 1 )) && cur='❯'
+    (( is_sel == 1 )) && cur="$SEL_CUR"
 
     _set_state_style "${STATES[$i]}"
     local mark_ch="$_MK" mc="$_MC" stxt="$_LB" sw="$_LW"
+
+    # 极端窄终端(ROW_W 很小)时的硬保证:先砍描述列,再砍名字列,
+    # 直到「内容 + 间隙 + 状态」放得下。缺了这一层,窄窗口会把右边框顶飞
+    # —— 这是老版本在 40 列终端下的真实故障。
+    local left_w=$(( 6 + name_w + desc_w ))
+    local gap=$(( ROW_W - left_w - sw - 1 ))
+    while (( gap < 1 )); do
+        if (( desc_w > 0 )); then   (( desc_w-- ))
+        elif (( name_w > 3 )); then (( name_w-- ))
+        else break
+        fi
+        left_w=$(( 6 + name_w + desc_w ))
+        gap=$(( ROW_W - left_w - sw - 1 ))
+    done
+    (( gap < 1 )) && gap=1
 
     local name="${NAMES[$i]}" desc="${DESCS[$i]}"
     local nw="${NAME_W[$i]}" dw="${DESC_W[$i]}"
 
     # 超宽才截断,截断后重新量一次宽度
     if (( nw > name_w )); then name="$(trunc_to "$name" "$name_w")"; nw="$(disp_w "$name")"; fi
-    if (( dw > desc_w )); then desc="$(trunc_to "$desc" "$desc_w")"; dw="$(disp_w "$desc")"; fi
+    if (( desc_w <= 0 )); then
+        desc=''; dw=0
+    elif (( dw > desc_w )); then
+        desc="$(trunc_to "$desc" "$desc_w")"; dw="$(disp_w "$desc")"
+    fi
 
     local name_pad desc_pad
     printf -v name_pad '%s%*s' "$name" "$(( name_w - nw ))" ''
     printf -v desc_pad '%s%*s' "$desc" "$(( desc_w - dw ))" ''
 
-    # 可见列数 = 5 + name_w + 1 + desc_w(随终端宽度变化,不再写死 46)
+    # 可见列数 = 6 + name_w + desc_w(随终端宽度变化,不再写死 46)。
     # 选中与非选中必须打印**完全相同**的可见结构,只换颜色码,
     # 否则两条分支差几列,右侧状态就对不齐(实测差 2 列)。
-    local left_w=$(( 6 + name_w + desc_w ))
-    local gap=$(( ROW_W - left_w - sw - 1 )); (( gap < 1 )) && gap=1
     local filler; printf -v filler '%*s' "$gap" ''
 
-    local left_part
+    # 可读性分层(2026-10-27):名字用亮色、描述用暗色,扫读时先看名字;
+    # 「未安装 / 无需检查」整行连同名字一起压暗 —— 一屏 8 个里 5 个没装时,
+    # 满屏红色会把真正能用的那两行淹没(README 的「为什么只有 8 个」讲过这个坑)。
+    local namecol="$C_FG" desccol="$C_MUT"
+    case "${STATES[$i]}" in
+        missing|skip) namecol="$C_DIM"; desccol="$C_DIM" ;;
+    esac
+
     if (( is_sel == 1 )); then
-        left_part="$C_SEL $cur $mark_ch $name_pad $desc_pad$C_RST"
+        # 选中行整行涂底色(含间隙与状态),只把状态词换成它自己的前景色;
+        # 这样高亮是一条完整的横带,不会出现「左半截有底色、右半截没有」。
+        left_part="$C_SEL $cur $mc$mark_ch$C_SEL $name_pad $desc_pad"
     else
         # 注意:$cur 后不能多留空格 —— 选中分支是 "$cur $mark_ch"
         # (一个空格),非选中也必须正好一个,否则整行宽差 1 列。
-        left_part="$C_MUT $cur$C_RST$C_FG $mark_ch $name_pad $desc_pad$C_RST"
+        left_part="$C_DIM $cur$C_RST$mc $mark_ch$C_RST $namecol$name_pad$C_RST $desccol$desc_pad$C_RST"
     fi
     # 结果写全局 _ROW,不 echo —— 调用方如果用 $(make_row ...),
     # 每行都会 fork 一个子 shell(实测 14 ms),38 行就是 0.5 秒。
@@ -559,27 +699,53 @@ build_frame() {
     printf -v PAD '%*s' "$LEFT_PAD" ''
 
     # ── 顶边框:╭─ ◆ YZZ · <展开> ───── <环境> ─╮ ───────────────────
-    local head="─ ◆ YZZ · ${YZZ_EXPAND} "
-    local tail=" ${ENV_TXT} ─"
-    local hw tw x
-    _dw "$head"; hw=$_W
-    _dw "$tail"; tw=$_W
-    (( CW - 2 - hw - tw < 2 )) && { head='─ ◆ YZZ '; _dw "$head"; hw=$_W; }
+    # 窄终端按三档降级:完整 → 去掉三词展开 → 连环境标签也不要。
+    # 少了这个降级,29 列以下终端上顶边框会写成 33 列,右边框直接被顶出屏幕。
+    local head_full="─ ◆ YZZ · ${YZZ_EXPAND} " tail_full=" ${ENV_TXT} ─"
+    local head_short='─ ◆ YZZ ' tail_short=' ─'
+    local head='' tail='' hw=0 tw=0 x=0 _lvl
+    for _lvl in 1 2 3; do
+        case "$_lvl" in
+            1) head="$head_full";  tail="$tail_full" ;;
+            2) head="$head_short"; tail="$tail_full" ;;
+            *) head="$head_short"; tail='' ;;
+        esac
+        _dw "$head"; hw=$_W
+        _dw "$tail"; tw=$_W
+        (( CW - 2 - hw - tw >= 2 )) && break
+    done
+    unset _lvl
     x=$(( CW - 2 - hw - tw )); (( x < 2 )) && x=2
     local dashes; printf -v dashes '%*s' "$x" ''
     dashes=${dashes// /─}
 
-    TOP="${PAD}${C_BRAND}╭${C_RST}${C_BRAND}${head}${C_RST}${C_DIM}${dashes}${C_RST}${C_MUT}${tail}${C_RST}${C_BRAND}╮${C_RST}"$'\n'
+    TOP="${PAD}${C_BRAND}╭${C_RST}${C_BRAND}${head}${C_RST}${C_MUT}${dashes}${C_RST}${C_MUT}${tail}${C_RST}${C_BRAND}╮${C_RST}"$'\n'
 
     # ── 空行 / 分隔线 / 底边框 ──────────────────────────────────────
     local blank; printf -v blank '%*s' "$inner_w" ''
-    BLANK="${PAD}${C_DIM}│${C_RST}${blank}${C_DIM}│${C_RST}"$'\n'
-    SEP="${PAD}${C_BRAND}├${C_RST}${C_DIM}${HLINE:0:inner_w}${C_RST}${C_BRAND}┤${C_RST}"$'\n'
+    BLANK="${PAD}${C_MUT}│${C_RST}${blank}${C_MUT}│${C_RST}"$'\n'
+
+    # 分隔线右端一格用来提示「上面/下面还有内容」:列表被滚动窗口裁掉时
+    # 换成 ↑ / ↓,宽度不变。用户不用数页码就知道自己站在列表哪一段。
+    local n_all=${#IDS[@]}
+    # ⚠ 不要写成 `local a=1 b="$a"`:同一个 local 命令里引用前一个变量,
+    #   在 set -u 下会报 "a: unbound variable"(实测 Git Bash)。分成两行。
+    local rule_top="${HLINE:0:inner_w}"
+    local rule_bot="$rule_top"
+    local mark_up='─' mark_dn='─'
+    (( SCROLL > 0 )) && mark_up='↑'
+    (( SCROLL + VIEW_H < n_all )) && mark_dn='↓'
+    if (( inner_w > 1 )); then
+        rule_top="${HLINE:0:inner_w-1}${C_MUT}${mark_up}${C_DIM}"
+        rule_bot="${HLINE:0:inner_w-1}${C_MUT}${mark_dn}${C_DIM}"
+    fi
+    SEP_TOP="${PAD}${C_BRAND}├${C_RST}${C_DIM}${rule_top}${C_RST}${C_BRAND}┤${C_RST}"$'\n'
+    SEP_BOT="${PAD}${C_BRAND}├${C_RST}${C_DIM}${rule_bot}${C_RST}${C_BRAND}┤${C_RST}"$'\n'
     # ⚠ BOTTOM **不带结尾换行**。它是整屏最后打印的东西,如果后面还有 \n,
     #   光标会多前进一行 —— 在「恰好排满」的终端里就触发滚动,把顶边框吃掉。
     #   实测:120x30 的窗口里 29 行内容 + 这个多余的 \n = 30 行,光标越过
     #   最后一行,整屏上滚 1 行,顶边框和字标第一行消失。
-    BOTTOM="${PAD}${C_BRAND}╰${C_RST}${C_DIM}${HLINE:0:inner_w}${C_RST}${C_BRAND}╯${C_RST}"
+    BOTTOM="${PAD}${C_BRAND}╰${C_RST}${C_MUT}${HLINE:0:inner_w}${C_RST}${C_BRAND}╯${C_RST}"
 
     # ── 块字(左对齐,与下方 agent 列表同一竖线)──────────────────────
     # 左对齐而不是居中:居中时字标和下面左对齐的列表毫无对齐关系,
@@ -595,7 +761,7 @@ build_frame() {
             local lp rp
             printf -v lp '%*s' "$pl" ''
             printf -v rp '%*s' "$pr" ''
-            HDR+="${PAD}${C_DIM}│${C_RST}${lp}${C_BRAND}${BANNER[$k]}${C_RST}${rp}${C_DIM}│${C_RST}"$'\n'
+            HDR+="${PAD}${C_MUT}│${C_RST}${lp}${C_BRAND}${BANNER[$k]}${C_RST}${rp}${C_MUT}│${C_RST}"$'\n'
         done
     fi
 
@@ -610,31 +776,70 @@ build_frame() {
         # 那样每行都会多 fork 一个子 shell(14 ms × 38 行 ≈ 0.5 秒)。
         make_row "$i" 0; body_off="$_ROW"
         make_row "$i" 1; body_sel="$_ROW"
-        ROW_OFF+=("${PAD}${C_DIM}│${C_RST} ${body_off} ${C_DIM}│${C_RST}"$'\n')
-        ROW_SEL+=("${PAD}${C_DIM}│${C_RST} ${body_sel} ${C_DIM}│${C_RST}"$'\n')
+        ROW_OFF+=("${PAD}${C_MUT}│${C_RST} ${body_off} ${C_MUT}│${C_RST}"$'\n')
+        ROW_SEL+=("${PAD}${C_MUT}│${C_RST} ${body_sel} ${C_MUT}│${C_RST}"$'\n')
     done
 
-    # ── 页脚:左侧键位提示(固定),右侧「当前/总数」随选择变化 ────────
-    _dw '↑↓ 选择   Enter 进入   q 退出'; KEY_W=$_W
+    # ── 页脚素材:左侧键位提示,右侧状态统计 + 当前/总数 ──────────────
+    # 键位提示预生成两档(完整/精简),窄终端自动降级,绝不撑破右边框。
+    KEYHINT="${C_ACC}↑↓${C_MUT} 选择   ${C_ACC}Enter${C_MUT} 进入   ${C_ACC}r${C_MUT} 刷新   ${C_ACC}?${C_MUT} 帮助   ${C_ACC}q${C_MUT} 退出"
+    _dw '↑↓ 选择   Enter 进入   r 刷新   ? 帮助   q 退出'; KEY_W=$_W
+    KEY_SHORT="${C_ACC}↑↓${C_MUT} 选择  ${C_ACC}Enter${C_MUT} 进入  ${C_ACC}r${C_MUT} 刷新  ${C_ACC}?${C_MUT} 帮助"
+    _dw '↑↓ 选择  Enter 进入  r 刷新  ? 帮助'; KEY_SHORT_W=$_W
+    # 第三档:极窄终端只剩「怎么操作」的最少信息
+    KEY_MINI="${C_MUT}↑↓ Enter r ? q"
+    _dw '↑↓ Enter r ? q'; KEY_MINI_W=$_W
+
+    # 状态统计:只显示非零项,一眼看出「这台机器上有几个真能用」。
+    # 「无需检查」(Bash)不计数 —— 它不是 agent,算进去只会稀释信号。
+    # 彩色版和纯文本版同步累加,纯文本那份只用来量宽度(必须精确到列)。
+    TALLY=''; local tally_plain=''
+    (( N_OK ))   && { TALLY+="${C_OK}✓${N_OK}${C_MUT} ";   tally_plain+="✓${N_OK} "; }
+    (( N_INST )) && { TALLY+="${C_INST}●${N_INST}${C_MUT} "; tally_plain+="●${N_INST} "; }
+    (( N_WARN )) && { TALLY+="${C_WARN}⚠${N_WARN}${C_MUT} "; tally_plain+="⚠${N_WARN} "; }
+    (( N_MISS )) && { TALLY+="${C_BAD}✗${N_MISS}${C_MUT} "; tally_plain+="✗${N_MISS} "; }
+    TALLY="${TALLY% }"
+    tally_plain="${tally_plain% }"
+    _dw "$tally_plain"; TALLY_W=$_W
 }
 
 # 页脚按当前选择重算(纯内建,零 fork)
+#
+# 可见结构:空格 + 键位提示 + 间隙 + 状态统计 + 空格 + 当前/总数 = ROW_W
+# 宽度不够时按顺序降级(统计 → 精简键位 → 去掉键位),保证右边框永远对齐。
 build_footer() {
     local sel="$1"
     local pos="$(( sel + 1 ))/${#IDS[@]}"
-    local padn
-    padn=$(( CW - 3 - KEY_W - ${#pos} )); (( padn < 1 )) && padn=1
-    local fp; printf -v fp '%*s' "$padn" ''
-    FOOT="${PAD}${C_DIM}│${C_RST} ${C_ACC}↑↓${C_MUT} 选择   ${C_ACC}Enter${C_MUT} 进入   ${C_ACC}q${C_MUT} 退出${fp}${C_MUT}${pos}${C_RST}${C_DIM}│${C_RST}"$'\n'
+    # 内容区宽度 = CW-2 = ROW_W+2(两条边框之间);再扣掉两侧各一个空格
+    # 和 pos 本身,剩下的才是「键位提示 + 状态统计」能用的体积。
+    local avail=$(( ROW_W + 2 - 3 - ${#pos} ))   # pos 是纯 ASCII,字符数即列数
+    (( avail < 1 )) && avail=1
+
+    local keys="$KEYHINT" kw="$KEY_W"
+    local tally="$TALLY"  tw="$TALLY_W"
+
+    # 依次降级:统计 → 精简键位 → 极简键位 → 只留位置 —— 永不撑破右边框
+    if (( kw + 1 + tw > avail )); then tally=''; tw=0; fi
+    if (( kw > avail )); then keys="$KEY_SHORT"; kw="$KEY_SHORT_W"; fi
+    if (( kw + 1 + tw > avail )); then tally=''; tw=0; fi
+    if (( kw > avail )); then keys="$KEY_MINI"; kw="$KEY_MINI_W"; fi
+    if (( kw > avail )); then keys=''; kw=0; fi
+
+    local gap=$(( avail - kw - tw )); (( gap < 1 )) && gap=1
+    local fp; printf -v fp '%*s' "$gap" ''
+    FOOT="${PAD}${C_MUT}│${C_RST} ${keys}${fp}${tally} ${C_MUT}${pos}${C_RST} ${C_MUT}│${C_RST}"$'\n'
 }
 
 # ── 整屏绘制 ────────────────────────────────────────────────────────
+# 直接用 ANSI 清屏,不调外部 clear:少一次 fork,也不依赖 TERM 是否有条目
+# (PortableGit 的 terminfo 缺项时,clear 会失败但界面还得画)。
+_CLEAR=$'\033[H\033[2J'
 draw_menu() {
     local sel="$1"
-    clear
+    printf '%s' "$_CLEAR"
     printf '%s%s' "$TOP" "$BLANK"
     if (( SHOW_ART )); then printf '%s%s' "$HDR" "$BLANK"; fi
-    printf '%s' "$SEP"
+    printf '%s' "$SEP_TOP"
     local j n=${#ROW_OFF[@]}
     for (( j=0; j<n; j++ )); do
         local idx=$(( SCROLL + j ))
@@ -642,7 +847,7 @@ draw_menu() {
         else                     printf '%s' "${ROW_OFF[$j]}"; fi
     done
     build_footer "$sel"
-    printf '%s%s%s' "$SEP" "$FOOT" "$BOTTOM"
+    printf '%s%s%s' "$SEP_BOT" "$FOOT" "$BOTTOM"
 }
 
 # ── 单行重绘(零 fork)───────────────────────────────────────────────
@@ -658,16 +863,74 @@ row_at() {
     printf '\033[%d;1H%s' $(( AGENT_TOP + j + 1 )) "$txt"
 }
 
+# ── 帮助浮层(? 触发)───────────────────────────────────────────────
+# 只画纯文本行,靠 _dw 逐行补到统一宽度 —— 带 ANSI 的字符串不能用 _dw 量
+# (转义序列会被当成可见字符)。任意键返回,返回后整屏重绘,所以不擦除。
+show_help() {
+    local w=$(( CW - 8 )); (( w > 62 )) && w=62; (( w < 26 )) && w=26
+    local inner=$(( w - 2 ))
+    local -a body=(
+        '↑↓ / j k   移动              Home / End  首行 / 末行'
+        'PgUp/PgDn  翻页              Enter       启动选中项'
+        'r          重新探测状态      ?           本帮助'
+        'q / Esc    退出启动器'
+        ''
+        '✓ 就绪   ● 已安装   ⚠ 缺 Key'
+        '✗ 未安装  · 无需检查'
+    )
+    # 竖排放不下就自尾向前砍行(优先保留键位说明)
+    local maxrows=$(( ROWS - 6 )); (( maxrows < 4 )) && maxrows=4
+    while (( ${#body[@]} + 2 > maxrows && ${#body[@]} > 1 )); do
+        body=("${body[@]:0:${#body[@]}-1}")
+    done
+    local box_h=$(( ${#body[@]} + 2 ))
+    local top_row=$(( (ROWS - box_h) / 2 )); (( top_row < 1 )) && top_row=1
+    local left_col=$(( (COLS - w) / 2 )); (( left_col < 0 )) && left_col=0
+    local i line pad
+    # 先清屏:帮助是模态画面,浮层比框架窄,不清屏会在它旁边留下一代目
+    # 菜单的半截文字(实测 "绪" / "ey" 这种碎字),看着像画错了。
+    # 返回时 main_loop 会整屏重绘,所以不用担心丢内容。
+    printf '%s' "$_CLEAR"
+    printf '\033[%d;%dH%s╭%s╮%s' "$top_row" $(( left_col + 1 )) \
+        "$C_BRAND" "${HLINE:0:inner}" "$C_RST"
+    for i in "${!body[@]}"; do
+        line="${body[$i]}"
+        _dw "$line"; pad=$(( inner - _W )); (( pad < 0 )) && pad=0
+        printf -v line '%s%s%*s' "$line" '' "$pad"
+        printf '\033[%d;%dH%s│%s%s%s%s%s│%s' $(( top_row + i + 1 )) $(( left_col + 1 )) \
+            "$C_MUT" "$C_FG" "$line" "$C_RST" "$C_MUT" "" "$C_RST"
+    done
+    printf '\033[%d;%dH%s╰%s╯%s' $(( top_row + box_h - 1 )) $(( left_col + 1 )) \
+        "$C_BRAND" "${HLINE:0:inner}" "$C_RST"
+    # 任意键关闭(不设超时:用户看完自然会按)
+    local _k
+    IFS= read -rsn1 _k || true
+}
+
 # ── 交互 ────────────────────────────────────────────────────────────
+# 读键用 0.25s 超时轮询,是为了让 SIGWINCH(拉窗口)不必等下一次按键才生效:
+# 老版本把 RESIZED 检查放在阻塞 read 之后,缩放完不动键盘画面就一直是旧的。
+KEY_TIMEOUT=0.25
+
+# 离开 TUI 时清屏:整屏恰好排满时,多打一个 \n 就会上滚一行、把顶边框顶出
+# 屏幕(README 第 15 条)。清屏比补 \n 稳,也给启动器留一个干净终端。
+quit_clean() {
+    printf '%s%s' "$C_SHOW" "$C_RST"
+    printf '%s' "$_CLEAR"
+}
+
 main_loop() {
     STTY_SAVED="$(stty -g 2>/dev/null || true)"
     stty -echo -icanon min 1 time 0 2>/dev/null || true
     printf '%s' "$C_HIDE"
 
     local sel=0 n=${#IDS[@]}
-    local shown=-1
+    local shown=-1 cur_id='' idle_ticks=0
 
     RESIZED=0
+    # SIGWINCH 在 Windows 控制台下**不可靠**(WT/conhost 不保证把 resize 变成
+    # 这个信号送到 MSYS bash)。实测:trap 装了,拉完窗口画面纹丝不动 ——
+    # 这条 trap 在老代码里一直是死代码。所以真正生效的是下面「空闲轮询」。
     trap 'RESIZED=1' WINCH 2>/dev/null || true
 
     compute_layout
@@ -676,37 +939,112 @@ main_loop() {
     shown=$sel
 
     while true; do
-        local k moved=0
-        IFS= read -rsn1 k || { printf '%s' "$C_SHOW$C_RST"; echo; return 130; }
+        local k='' rc=0
+        IFS= read -rsn1 -t "$KEY_TIMEOUT" k; rc=$?
 
+        # 空闲轮询终端尺寸:每 4 次读超时(≈1 秒)量一次。
+        # 代价是空闲时约 1 次 fork/秒(stty size),换来「拉窗口 1 秒内自动重排」;
+        # 有键按下就不量(按键路径仍然零 fork)。
+        if (( rc > 128 )); then
+            idle_ticks=$(( idle_ticks + 1 ))
+            if (( idle_ticks >= 4 )); then
+                idle_ticks=0
+                term_dims
+                (( _TC != COLS || _TR != ROWS )) && RESIZED=1
+            fi
+        else
+            idle_ticks=0
+        fi
+
+        # 窗口缩放 → 按新尺寸重排
+        # ⚠ 这里有两个坑,都实测踩过:
+        #   1) 缩放瞬间 stty 报的仍是旧尺寸 —— 用旧尺寸画新窗口,自动换行会把
+        #      整屏切成错位残片,甚至比不画还乱;
+        #   2) 二次读数也可能还是旧的(0.12s 不够),所以不能只信一次。
+        # 对策:等一小会儿 → 画 → 再等 0.4s 复核 → 变了就再画一次(最多 3 轮)。
         if (( RESIZED )); then
             RESIZED=0
-            compute_layout
-            build_frame
-            draw_menu "$sel"
+            sleep 0.15
+            local guard=0
+            while (( guard < 3 )); do
+                guard=$(( guard + 1 ))
+                compute_layout
+                build_frame
+                draw_menu "$sel"
+                sleep 0.40
+                term_dims
+                (( _TC == COLS && _TR == ROWS )) && break
+            done
             shown=$sel
             continue
         fi
+        (( rc > 128 )) && continue          # 超时:继续等键
+        if (( rc != 0 )); then
+            quit_clean; return 130          # stdin 关闭(被管道调用等)
+        fi
 
+        local moved=0 refresh=0 help=0 quit=0
         case "$k" in
             $'\e')
-                local k2='' k3=''
+                # 方向键/Home/End/PgUp/PgDn 都是 ESC [ …,单独 Esc = 退出。
+                # 20ms 的后续字节窗口:人按 Esc 的手速远慢于这个间隔。
+                local k2='' k3='' k4=''
                 IFS= read -rsn1 -t 0.02 k2 2>/dev/null || true
                 IFS= read -rsn1 -t 0.02 k3 2>/dev/null || true
-                if [[ "$k2" == '[' ]]; then
+                if [[ "$k2" != '[' ]]; then
+                    quit=1
+                else
                     case "$k3" in
-                        A) sel=$(( (sel - 1 + n) % n )); moved=1;;
-                        B) sel=$(( (sel + 1) % n )); moved=1;;
+                        A) sel=$(( (sel - 1 + n) % n )); moved=1 ;;
+                        B) sel=$(( (sel + 1) % n ));     moved=1 ;;
+                        H) sel=0;                        moved=1 ;;
+                        F) sel=$(( n - 1 ));             moved=1 ;;
+                        1|4|5|6|7|8)
+                            IFS= read -rsn1 -t 0.02 k4 2>/dev/null || true
+                            case "$k3$k4" in
+                                5'~') sel=$(( sel - VIEW_H )); (( sel < 0 )) && sel=0; moved=1 ;;
+                                6'~') sel=$(( sel + VIEW_H )); (( sel > n - 1 )) && sel=$(( n - 1 )); moved=1 ;;
+                            esac ;;
                     esac
                 fi ;;
-            k) sel=$(( (sel - 1 + n) % n )); moved=1;;
-            j) sel=$(( (sel + 1) % n )); moved=1;;
-            q|Q) printf '%s' "$C_SHOW$C_RST"; echo; return 130;;
-            ''|$'\n')
-                printf '%s' "$C_SHOW$C_RST"
+            k|K) sel=$(( (sel - 1 + n) % n )); moved=1 ;;
+            j|J) sel=$(( (sel + 1) % n ));     moved=1 ;;
+            g)   sel=0;                        moved=1 ;;
+            G)   sel=$(( n - 1 ));             moved=1 ;;
+            r|R) refresh=1 ;;
+            '?') help=1 ;;
+            q|Q) quit=1 ;;
+            ''|$'\n'|$'\r')
+                printf '%s%s' "$C_SHOW" "$C_RST"
                 printf '%s\n' "${IDS[$sel]}" >&3
-                return 0;;
+                return 0 ;;
         esac
+
+        if (( quit )); then quit_clean; return 130; fi
+
+        if (( help )); then
+            show_help
+            draw_menu "$sel"; shown=$sel
+            continue
+        fi
+
+        if (( refresh )); then
+            # 记住选中项 id,重排后仍落回同一项 —— 刷新不该改变用户的位置。
+            cur_id="${IDS[$sel]}"
+            load_agents
+            n=${#IDS[@]}
+            compute_layout
+            build_frame
+            sel=0
+            local i2
+            for (( i2=0; i2<n; i2++ )); do
+                [[ "${IDS[$i2]}" == "$cur_id" ]] && { sel=$i2; break; }
+            done
+            if (( sel < SCROLL )); then SCROLL=$sel
+            elif (( sel >= SCROLL + VIEW_H )); then SCROLL=$(( sel - VIEW_H + 1 )); fi
+            draw_menu "$sel"; shown=$sel
+            continue
+        fi
 
         if (( moved == 1 && sel != shown )); then
             # 先算新的滚动窗口
@@ -718,7 +1056,7 @@ main_loop() {
             fi
 
             if (( SCROLL != old_scroll )); then
-                # 窗口动了 → 整个可见块重画(仍是一次预计算字符串的打印,很快)
+                # 窗口动了 → 重建(↑/↓ 提示与行内容都变),再整块重画
                 build_frame
                 local j
                 for (( j=0; j<VIEW_H; j++ )); do
@@ -741,11 +1079,39 @@ main_loop() {
 
 # ── 入口 ────────────────────────────────────────────────────────────
 # --list / --help 直接写 stdout(这些是给人或管道看的,不是 UI)
-[[ "${1:-}" == '--list' ]] && { bash "$CHECK"; exit 0; }
-[[ "${1:-}" == '--help' || "${1:-}" == '-h' ]] && { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+NO_SPLASH=0
+DUMP=0
+case "${1:-}" in
+    --list)      bash "$CHECK"; exit 0 ;;
+    --help|-h)   sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --no-splash) NO_SPLASH=1 ;;
+    --dump)      DUMP=1; NO_SPLASH=1 ;;   # 纯文本整屏,给 selftest / 文档用
+    # 逐行量显示宽度:读 stdin,输出 "<宽度>\t<原行>"。
+    # 供 selftest.sh 校验宽度引擎(_dw)与 wc -L 是否一致 —— 这是第 16 条坑
+    # (无 UTF-8 locale 时 ${#s} 数字节)的守门员。
+    --width-probe)
+        while IFS= read -r _line; do
+            _dw "$_line"
+            printf '%s\t%s\n' "$_W" "$_line"
+        done
+        exit 0 ;;
+esac
 
 load_agents
-[[ ${#IDS[@]} -eq 0 ]] && { echo "agentbox: 清单里没有可用 agent" >&2; exit 2; }
+[[ ${#IDS[@]} -eq 0 ]] && { printf 'agentbox: 清单里没有可用 agent\n' >&2; exit 2; }
+
+# --dump:不带任何 ANSI 地把一屏画到 stdout,然后退出。
+# 这样回归测试可以不依赖 PTY,只用 COLUMNS/LINES 就能逐格比对。
+if (( DUMP )); then
+    C_BRAND=''; C_ACC=''; C_FG=''; C_MUT=''; C_DIM=''
+    C_OK=''; C_INST=''; C_WARN=''; C_BAD=''; C_SEL=''; C_RST=''
+    _CLEAR=''
+    pick_banner
+    compute_layout
+    build_frame
+    draw_menu 0
+    exit 0
+fi
 
 # ── 输出契约:UI 走 stderr,选择结果走 fd 3 ──────────────────────────
 # 背景:启动器用 choice="$(bash agentbox-tui.sh)" 捕获 stdout。
@@ -756,6 +1122,10 @@ load_agents
 # 这样 TUI 既能单独在终端里跑(--list 仍走 stdout),也能被程序调用。
 exec 3>&1
 exec 1>&2
+
+# 从这里开始才接管终端,装上清理钩子(Ctrl+C / 异常退出都要把光标和 stty 复原)
+trap 'cleanup; exit 130' INT TERM
+trap cleanup EXIT
 
 pick_logo
 pick_banner
