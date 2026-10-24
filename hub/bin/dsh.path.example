@@ -1,0 +1,9 @@
+# 把下面这一行的注释去掉,并把路径改成你自己机器上 DSH 的位置。
+# 只有在 bin/dsh.sh 自动找不到时才需要这个文件。
+# 路径指向 @deepseek-ai/dsh 的 CLI 入口(bin.js),不是 exe。
+#
+# 例(Windows 安装版):
+# C:/Program Files/deepseek-harness/DSH NEXT/resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js
+#
+# 例(便携版放在本文件夹旁的 dsh/ 里):
+# dsh/App/resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js

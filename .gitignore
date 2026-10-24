@@ -1,0 +1,36 @@
+# ============================================================
+#  YZZ -- what is NOT version controlled
+# ============================================================
+#  Everything below is either downloadable (runtimes) or machine
+#  state / secrets (login state, caches). The repo keeps only the
+#  launcher, the hub (TUI + scripts) and the docs, so a clone stays
+#  a few dozen KB instead of ~2 GB.
+
+# ---- runtimes: re-download, see README "重建运行时" ----
+/runtime/
+/npm-global/
+/dsh/
+
+# ---- machine state: fake user profile, temp, logs ----
+/home/
+/temp/
+/logs/
+
+# ---- user data (whatever you work on from the TUI) ----
+/workspace/
+
+# ---- OS / editor junk ----
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*~
+
+# ---- logs / crash dumps ----
+*.log
+*.dmp
+
+# ---- downloaded installers (keep the URL in README, not the blob) ----
+*.zip
+*.7z
+*.msi

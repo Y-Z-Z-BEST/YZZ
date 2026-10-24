@@ -1,0 +1,10 @@
+# Keep line endings honest across platforms:
+#   - the .cmd launchers only parse correctly with CRLF on Windows
+#   - bash scripts and docs want LF everywhere
+* text=auto eol=lf
+
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.sh  text eol=lf
+
+*.png binary

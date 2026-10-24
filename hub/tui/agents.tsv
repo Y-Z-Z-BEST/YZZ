@@ -1,0 +1,59 @@
+# Pocket Agent Hub × AgentBox —— Git Bash agent 清单
+# ═════════════════════════════════════════════════════════════════════
+# 契约(沿用 AgentBox):agent 清单由本文件提供,启动器不得硬编码。
+# 改这里 = 改菜单,不需要改 TUI 或分发逻辑。
+#
+# 格式:每个数据行恰好 6 个制表符,分隔 7 个字段。
+#
+#   1 id         稳定标识。TUI 把这个字符串打到 stdout 作为选择结果。
+#   2 name       菜单显示名(显示宽度建议 ≤ 14 列,超出会被截断加 …)
+#   3 desc       右侧说明(显示宽度建议 ≤ 26 列)
+#   4 cmd        执行的命令。默认按空格安全切分后 exec(不经 shell)。
+#                以 ! 开头 = 整行交给 shell(用于路径含空格的情况)
+#   5 check_cmd  探测「是否已安装」。**可以写多个候选命令名**,空格或逗号
+#                分隔,任一存在即算装上 —— 因为有些 agent 在不同发行渠道
+#                下命令名不同(例如 kilo / kilocode),只认一个会漏判成
+#                「未安装」。当前清单里的 8 个都用单一名字,但能力保留。
+#   6 key_env    需要的环境变量名(多个用逗号分隔)
+#   7 key_file   替代凭据文件(存在且非空即视为已配置)
+#
+# ⚠ 空字段必须写 - 占位,不能真的留空。
+#   原因:bash 的 read 把 tab 当作 IFS 空白,连续 tab 会被折叠成一个,
+#   空字段直接消失,后面的字段整体左移。实测:
+#       printf 'a\tb\t\tc' | { IFS=$'\t' read f1 f2 f3 f4; }   → f3=c,f4=空
+#
+# 状态规则:
+#   check_cmd 为 -                            → ·  无需检查(如 Bash)
+#   命令不存在                                 → ✗  未安装
+#   命令存在,key_env 或 key_file 任一满足       → ✓  就绪
+#   命令存在,声明了凭据但都不满足               → ⚠  缺 Key
+#   命令存在,但没声明任何凭据可查               → ●  已安装(未验证登录)
+#
+#   最后一条是刻意的:大部分 agent 装完还要跑一次登录才真能用,
+#   把「命令存在」说成「就绪」是撒谎,所以单独给一个状态。
+#
+# 清单顺序不代表菜单顺序 —— TUI 会按状态排序(就绪 → 已安装 → 缺 Key →
+# 无需检查 → 未安装),装好的排前面。
+#
+# ── 为什么只有 8 个 ─────────────────────────────────────────────────
+# 这份清单刻意只收「当前最主流、实际有人天天用」的终端 agent。
+# 曾经扩到 19 个,把 Crush / Amp / Auggie / Goose / Cline / Kilo /
+# Grok CLI / Oh My Pi / iFlow / CodeBuddy 都列进来了 —— 它们要么太小众,
+# 要么主要是 VS Code 扩展/Copilot 风格而不是独立的终端 CLI,
+# 结果菜单变成一片红色的「未安装」,反而不好用。
+#
+# 想加回来任何一个:照着下面格式加一行就行,不需要改任何脚本。
+# 命令名务必查实际来源(npm registry 的 bin 字段 / 官方文档),
+# 不要凭印象写 —— 写错了只会一直显示「未安装」。
+#
+# 当前 8 个的命令名来源:npm registry 的 bin 字段实测(2026-10-18)。
+# ═════════════════════════════════════════════════════════════════════
+opencode	OpenCode	开源 · 可自配模型	opencode	opencode	-	~/.local/share/opencode/auth.json
+dsh	DSH	DeepSeek Harness 网页端	!bash "$AGENTBOX_HUB/bin/dsh.sh"	!bash "$AGENTBOX_HUB/bin/dsh.sh" --probe	-	-
+claude	Claude Code	Anthropic 官方	claude	claude	ANTHROPIC_API_KEY	~/.claude/.credentials.json
+codex	Codex CLI	OpenAI 官方	codex	codex	OPENAI_API_KEY	~/.codex/auth.json
+gemini	Gemini CLI	Google 官方	gemini	gemini	GEMINI_API_KEY	~/.gemini/oauth_creds.json
+qwen	Qwen Code	通义千问 · 国产	qwen	qwen	-	~/.qwen/oauth_creds.json
+copilot	Copilot CLI	GitHub 官方	copilot	copilot	-	-
+aider	Aider	老牌开源 · git 友好	aider	aider	-	-
+bash	Bash	纯终端 · 不启动 agent	bash -l	-	-	-
